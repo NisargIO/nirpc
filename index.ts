@@ -56,11 +56,29 @@ export interface EventOptions<Remote> {
   timeout?: number;
 
   /**
+   * Maximum timeout for waiting for acknowledgement, in milliseconds.
+   *
+   * @default 5_000
+   */
+  ackTimeout?: number;
+
+  /**
    * Custom resolver to resolve function to be called
    *
    * For advanced use cases only
    */
   resolver?: NirpcResolver;
+
+  /**
+   * Initial middleware that runs before any send operation
+   *
+   * @param req - Request parameters
+   * @param next - Function to continue to the next middleware or send
+   */
+  middleware?: (
+    req: Request,
+    next: (req?: Request) => Promise<any>
+  ) => Promise<any>;
 
   /**
    * Hook triggered before an event is sent to the remote
@@ -110,6 +128,13 @@ export interface EventOptions<Remote> {
    * @returns `true` to prevent the error from being thrown
    */
   onTimeoutError?: (functionName: string, args: any[]) => boolean | void;
+
+  /**
+   * Custom error handler for acknowledgement timeouts
+   *
+   * @returns `true` to prevent the error from being thrown
+   */
+  onAckTimeoutError?: (functionName: string, args: any[]) => boolean | void;
 }
 
 export type NirpcOptions<Remote> = EventOptions<Remote> & ChannelOptions;
@@ -120,6 +145,32 @@ export type NirpcFn<T> = PromisifyFn<T> & {
    */
   asEvent: (...args: ArgumentsType<T>) => Promise<void>;
 };
+
+export interface RpcCallBuilder<T> {
+  /**
+   * Set the parameters for the method call
+   */
+  params(...args: ArgumentsType<T>): RpcCallBuilderWithParams<T>;
+}
+
+export interface RpcCallBuilderWithParams<T> {
+  /**
+   * Set the function execution timeout in milliseconds
+   */
+  timeout(ms: number): this;
+  /**
+   * Set the acknowledgement timeout in milliseconds
+   */
+  ackTimeout(ms: number): this;
+  /**
+   * Set the number of retry attempts
+   */
+  retry(attempts: number): this;
+  /**
+   * Execute the remote method call
+   */
+  execute(): Promise<Awaited<ReturnType<T>>>;
+}
 
 export interface NirpcGroupFn<T> {
   /**
@@ -183,6 +234,12 @@ export interface NirpcReturnBuiltin<
     event?: boolean;
     optional?: boolean;
   }) => Promise<Awaited<ReturnType<any>>[]>;
+  /**
+   * Create a builder for calling a remote method with advanced options
+   */
+  $builder: <K extends keyof RemoteFunctions>(
+    method: K
+  ) => RpcCallBuilder<RemoteFunctions[K]>;
 }
 
 export type NirpcReturn<
@@ -242,10 +299,13 @@ interface PromiseEntry {
   reject: (error: any) => void;
   method: string;
   timeoutId?: ReturnType<typeof setTimeout>;
+  ackTimeoutId?: ReturnType<typeof setTimeout>;
+  ackReceived?: boolean;
 }
 
 const TYPE_REQUEST = "q" as const;
 const TYPE_RESPONSE = "s" as const;
+const TYPE_ACK = "a" as const;
 
 interface Request {
   /**
@@ -289,9 +349,21 @@ interface Response {
   e?: any;
 }
 
-type RPCMessage = Request | Response;
+interface Acknowledgement {
+  /**
+   * Type
+   */
+  t: typeof TYPE_ACK;
+  /**
+   * Id
+   */
+  i: string;
+}
+
+type RPCMessage = Request | Response | Acknowledgement;
 
 export const DEFAULT_TIMEOUT = 60_000; // 1 minute
+export const DEFAULT_ACK_TIMEOUT = 5_000; // 5 seconds
 
 function defaultSerialize(i: any) {
   return i;
@@ -319,6 +391,8 @@ export function createNirpc<
     resolver,
     bind = "rpc",
     timeout = DEFAULT_TIMEOUT,
+    ackTimeout = DEFAULT_ACK_TIMEOUT,
+    middleware,
   } = options;
 
   let $closed = false;
@@ -330,7 +404,46 @@ export function createNirpc<
     method: string,
     args: unknown[],
     event?: boolean,
-    optional?: boolean
+    optional?: boolean,
+    callOptions?: {
+      timeout?: number;
+      ackTimeout?: number;
+      retry?: number;
+    }
+  ): Promise<any> {
+    const maxRetries = callOptions?.retry ?? 0;
+    const callTimeout = callOptions?.timeout ?? timeout;
+    const callAckTimeout = callOptions?.ackTimeout ?? ackTimeout;
+
+    let lastError: any;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await _callOnce(
+          method,
+          args,
+          event,
+          optional,
+          callTimeout,
+          callAckTimeout
+        );
+      } catch (e) {
+        lastError = e;
+        if (attempt < maxRetries) {
+          // Wait a bit before retrying
+          await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+        }
+      }
+    }
+    throw lastError;
+  }
+
+  async function _callOnce(
+    method: string,
+    args: unknown[],
+    event?: boolean,
+    optional?: boolean,
+    callTimeout?: number,
+    callAckTimeout?: number
   ) {
     if ($closed)
       throw new Error(`[Nirpc] rpc is closed, cannot call "${method}"`);
@@ -338,7 +451,16 @@ export function createNirpc<
     const req: Request = { m: method, a: args, t: TYPE_REQUEST };
     if (optional) req.o = true;
 
-    const send = async (_req: Request) => post(serialize(_req));
+    const send = async (_req: Request) => {
+      // Apply middleware if provided
+      if (middleware) {
+        return await middleware(_req, async (modifiedReq = _req) => {
+          return await post(serialize(modifiedReq));
+        });
+      }
+      return await post(serialize(_req));
+    };
+
     if (event) {
       await send(req);
       return;
@@ -360,9 +482,42 @@ export function createNirpc<
     const id = nanoid();
     req.i = id;
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let ackTimeoutId: ReturnType<typeof setTimeout> | undefined;
 
     async function handler(newReq: Request = req) {
-      if (timeout >= 0) {
+      const entry: PromiseEntry = {
+        resolve,
+        reject,
+        timeoutId,
+        ackTimeoutId,
+        method,
+        ackReceived: false,
+      };
+
+      // Set acknowledgement timeout
+      if (callAckTimeout !== undefined && callAckTimeout >= 0) {
+        ackTimeoutId = setTimeout(() => {
+          if (!entry.ackReceived) {
+            try {
+              const handleResult = options.onAckTimeoutError?.(method, args);
+              if (handleResult !== true)
+                throw new Error(
+                  `[Nirpc] acknowledgement timeout on calling "${method}"`
+                );
+            } catch (e) {
+              reject(e);
+            }
+            _rpcPromiseMap.delete(id);
+          }
+        }, callAckTimeout);
+
+        // For node.js, `unref` is not available in browser-like environments
+        if (typeof ackTimeoutId === "object") ackTimeoutId = ackTimeoutId.unref?.();
+        entry.ackTimeoutId = ackTimeoutId;
+      }
+
+      // Set function execution timeout
+      if (callTimeout !== undefined && callTimeout >= 0) {
         timeoutId = setTimeout(() => {
           try {
             // Custom onTimeoutError handler can throw its own error too
@@ -373,13 +528,14 @@ export function createNirpc<
             reject(e);
           }
           _rpcPromiseMap.delete(id);
-        }, timeout);
+        }, callTimeout);
 
         // For node.js, `unref` is not available in browser-like environments
         if (typeof timeoutId === "object") timeoutId = timeoutId.unref?.();
+        entry.timeoutId = timeoutId;
       }
 
-      _rpcPromiseMap.set(id, { resolve, reject, timeoutId, method });
+      _rpcPromiseMap.set(id, entry);
       await send(newReq);
       return promise;
     }
@@ -392,6 +548,7 @@ export function createNirpc<
       return;
     } finally {
       clearTimeout(timeoutId);
+      clearTimeout(ackTimeoutId);
       _rpcPromiseMap.delete(id);
     }
 
@@ -417,11 +574,48 @@ export function createNirpc<
     optional?: boolean;
   }) => _call(options.method, options.args, options.event, options.optional);
 
+  const $builder = <K extends keyof RemoteFunctions>(
+    method: K
+  ): RpcCallBuilder<RemoteFunctions[K]> => {
+    return {
+      params: (...args: ArgumentsType<RemoteFunctions[K]>) => {
+        let callTimeout: number | undefined;
+        let callAckTimeout: number | undefined;
+        let retryAttempts: number | undefined;
+
+        const builder: RpcCallBuilderWithParams<RemoteFunctions[K]> = {
+          timeout(ms: number) {
+            callTimeout = ms;
+            return builder;
+          },
+          ackTimeout(ms: number) {
+            callAckTimeout = ms;
+            return builder;
+          },
+          retry(attempts: number) {
+            retryAttempts = attempts;
+            return builder;
+          },
+          execute() {
+            return _call(method as string, args, false, false, {
+              timeout: callTimeout,
+              ackTimeout: callAckTimeout,
+              retry: retryAttempts,
+            });
+          },
+        };
+
+        return builder;
+      },
+    };
+  };
+
   const builtinMethods = {
     $call,
     $callOptional,
     $callEvent,
     $callRaw,
+    $builder,
     $rejectPendingCalls,
     get $closed() {
       return $closed;
@@ -500,7 +694,21 @@ export function createNirpc<
     }
 
     if (msg.t === TYPE_REQUEST) {
-      const { m: method, a: args, o: optional } = msg;
+      const { m: method, a: args, o: optional, i: msgId } = msg;
+      
+      // Send acknowledgement if message has an ID
+      if (msgId) {
+        try {
+          await post(
+            serialize(<Acknowledgement>{ t: TYPE_ACK, i: msgId }),
+            ...extra
+          );
+        } catch (e) {
+          if (options.onGeneralError?.(e as Error, method, args) !== true)
+            throw e;
+        }
+      }
+
       let result, error: any;
       let fn = await (resolver
         ? resolver(method, ($functions as any)[method])
@@ -518,7 +726,7 @@ export function createNirpc<
         }
       }
 
-      if (msg.i) {
+      if (msgId) {
         // Error handling
         if (error && options.onError) options.onError(error, method, args);
         if (error && options.onFunctionError) {
@@ -529,7 +737,7 @@ export function createNirpc<
         if (!error) {
           try {
             await post(
-              serialize(<Response>{ t: TYPE_RESPONSE, i: msg.i, r: result }),
+              serialize(<Response>{ t: TYPE_RESPONSE, i: msgId, r: result }),
               ...extra
             );
             return;
@@ -542,7 +750,7 @@ export function createNirpc<
         // Try to send error if serialization failed
         try {
           await post(
-            serialize(<Response>{ t: TYPE_RESPONSE, i: msg.i, e: error }),
+            serialize(<Response>{ t: TYPE_RESPONSE, i: msgId, e: error }),
             ...extra
           );
         } catch (e) {
@@ -550,11 +758,21 @@ export function createNirpc<
             throw e;
         }
       }
-    } else {
+    } else if (msg.t === TYPE_ACK) {
+      // Handle acknowledgement
+      const { i: ack } = msg;
+      const entry = _rpcPromiseMap.get(ack);
+      if (entry) {
+        entry.ackReceived = true;
+        clearTimeout(entry.ackTimeoutId);
+      }
+    } else if (msg.t === TYPE_RESPONSE) {
+      // Handle response
       const { i: ack, r: result, e: error } = msg;
       const promise = _rpcPromiseMap.get(ack);
       if (promise) {
         clearTimeout(promise.timeoutId);
+        clearTimeout(promise.ackTimeoutId);
 
         if (error) promise.reject(error);
         else promise.resolve(result);
