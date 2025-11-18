@@ -1,5 +1,12 @@
 import { test, expect, describe, beforeEach, mock } from "bun:test";
-import { createNirpc, NirpcCallBuilder, DEFAULT_TIMEOUT, DEFAULT_ACK_TIMEOUT } from "./index";
+import {
+  createNirpc,
+  NirpcCallBuilder,
+  DEFAULT_TIMEOUT,
+  DEFAULT_ACK_TIMEOUT,
+  TimeoutError,
+  AckTimeoutError,
+} from "./index";
 
 describe("RPC Core Functionality", () => {
   test("should create RPC instance", () => {
@@ -127,10 +134,8 @@ describe("Acknowledgement Protocol", () => {
       }
     );
 
-    const promise = rpc.$call("test");
-    
     // Wait for ack timeout
-    await expect(promise).rejects.toThrow("acknowledgement timeout");
+    await expect(rpc.$call("test")).rejects.toBeInstanceOf(AckTimeoutError);
   });
 
   test("should clear ack timeout when acknowledgement received", async () => {
@@ -322,13 +327,13 @@ describe("Builder Pattern", () => {
       }
     );
 
-    const promise = rpc.$builder("test").timeout(100).execute();
-
     // Don't send response, let it timeout
-    await expect(promise).rejects.toThrow("timeout");
+    await expect(
+      rpc.$builder("test").timeout(100).execute()
+    ).rejects.toBeInstanceOf(TimeoutError);
   });
 
-  test("should execute builder with params", async () => {
+  test("should execute options().run() with params", async () => {
     let messageHandler: any;
     let sentRequest: any;
 
@@ -354,7 +359,7 @@ describe("Builder Pattern", () => {
       }
     );
 
-    const result = await rpc.$builder("add").params(5, 10).execute();
+    const result = await rpc.add.options({ timeout: 1000 }).run(5, 10);
 
     expect(sentRequest.a).toEqual([5, 10]);
     expect(result).toBe(15);
@@ -583,7 +588,7 @@ describe("Error Handling", () => {
       }
     );
 
-    await expect(rpc.$call("slowFunc")).rejects.toThrow("timeout");
+    await expect(rpc.$call("slowFunc")).rejects.toBeInstanceOf(TimeoutError);
   });
 });
 

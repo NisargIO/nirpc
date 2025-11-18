@@ -136,11 +136,31 @@ export interface EventOptions<Remote> {
 
 export type NirpcOptions<Remote> = EventOptions<Remote> & ChannelOptions;
 
+export interface NirpcCallOptions {
+  timeout?: number;
+  ackTimeout?: number;
+  retry?: number;
+}
+
 export type NirpcFn<T> = PromisifyFn<T> & {
   /**
    * Send event without asking for response
    */
   asEvent: (...args: ArgumentsType<T>) => Promise<void>;
+  /**
+   * Configure advanced call options (timeout, acknowledgement timeout, retry)
+   * while preserving direct access to the function type.
+   *
+   * Example:
+   *   await client.failingOperation
+   *     .options({ timeout: 1000, retry: 2 })
+   *     .run(params);
+   */
+  options: (
+    options: NirpcCallOptions
+  ) => {
+    run: (...args: ArgumentsType<T>) => Promise<Awaited<ReturnType<T>>>;
+  };
 };
 
 export interface NirpcGroupFn<T> {
@@ -336,6 +356,26 @@ type RPCMessage = Request | Response | Acknowledgement;
 export const DEFAULT_TIMEOUT = 60_000; // 1 minute
 export const DEFAULT_ACK_TIMEOUT = 5_000; // 5 seconds
 
+export class TimeoutError extends Error {
+  readonly functionName: string;
+
+  constructor(functionName: string) {
+    super(`[Nirpc] timeout on calling "${functionName}"`);
+    this.name = "TimeoutError";
+    this.functionName = functionName;
+  }
+}
+
+export class AckTimeoutError extends Error {
+  readonly functionName: string;
+
+  constructor(functionName: string) {
+    super(`[Nirpc] acknowledgement timeout on calling "${functionName}"`);
+    this.name = "AckTimeoutError";
+    this.functionName = functionName;
+  }
+}
+
 function defaultSerialize(i: any) {
   return i;
 }
@@ -376,11 +416,7 @@ export function createNirpc<
     args: unknown[],
     event?: boolean,
     optional?: boolean,
-    callOptions?: {
-      timeout?: number;
-      ackTimeout?: number;
-      retry?: number;
-    }
+    callOptions?: NirpcCallOptions
   ) {
     if ($closed)
       throw new Error(`[Nirpc] rpc is closed, cannot call "${method}"`);
@@ -429,9 +465,9 @@ export function createNirpc<
           const entry = _rpcPromiseMap.get(id);
           if (entry && !entry.acknowledged) {
             try {
+              const error = new AckTimeoutError(method);
               const handleResult = options.onAckTimeoutError?.(method, args);
-              if (handleResult !== true)
-                throw new Error(`[Nirpc] acknowledgement timeout on calling "${method}"`);
+              if (handleResult !== true) throw error;
             } catch (e) {
               reject(e);
             }
@@ -446,9 +482,9 @@ export function createNirpc<
       if (actualTimeout >= 0) {
         timeoutId = setTimeout(() => {
           try {
+            const error = new TimeoutError(method);
             const handleResult = options.onTimeoutError?.(method, args);
-            if (handleResult !== true)
-              throw new Error(`[Nirpc] timeout on calling "${method}"`);
+            if (handleResult !== true) throw error;
           } catch (e) {
             reject(e);
           }
@@ -565,6 +601,10 @@ export function createNirpc<
           return sendEvent;
         }
         const sendCall = (...args: any[]) => _call(method, args, false);
+        sendCall.options = (options: NirpcCallOptions) => ({
+          run: (...args: any[]) =>
+            _call(method, args, false, false, options),
+        });
         sendCall.asEvent = sendEvent;
         return sendCall;
       },
@@ -845,11 +885,7 @@ export class NirpcCallBuilder<T> {
     args: unknown[],
     event?: boolean,
     optional?: boolean,
-    callOptions?: {
-      timeout?: number;
-      ackTimeout?: number;
-      retry?: number;
-    }
+    callOptions?: NirpcCallOptions
   ) => Promise<any>;
 
   constructor(
@@ -859,11 +895,7 @@ export class NirpcCallBuilder<T> {
       args: unknown[],
       event?: boolean,
       optional?: boolean,
-      callOptions?: {
-        timeout?: number;
-        ackTimeout?: number;
-        retry?: number;
-      }
+      callOptions?: NirpcCallOptions
     ) => Promise<any>
   ) {
     this._method = method;

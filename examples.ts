@@ -48,27 +48,19 @@ const rpc = createNirpc<RemoteFunctions, LocalFunctions>(localFunctions, {
 // Example 2: Using the builder pattern
 async function exampleBuilderPattern() {
   // Simple call with timeout
-  const result1 = await rpc
-    .$builder("hello")
-    .params("World")
-    .timeout(1000)
-    .execute();
+  const result1 = await rpc.hello
+    .options({ timeout: 1000 })
+    .run("World");
 
   // Call with acknowledgement timeout
-  const result2 = await rpc
-    .$builder("calculate")
-    .params(10, 20)
-    .ackTimeout(500)
-    .timeout(2000)
-    .execute();
+  const result2 = await rpc.calculate
+    .options({ ackTimeout: 500, timeout: 2000 })
+    .run(10, 20);
 
   // Call with retry logic
-  const result3 = await rpc
-    .$builder("asyncTask")
-    .timeout(5000)
-    .ackTimeout(1000)
-    .retry(3) // Retry up to 3 times on failure
-    .execute();
+  const result3 = await rpc.asyncTask
+    .options({ timeout: 5000, ackTimeout: 1000, retry: 3 }) // Retry up to 3 times on failure
+    .run();
 
   console.log("Results:", result1, result2, result3);
 }
@@ -120,12 +112,13 @@ async function exampleAllBuilderOptions() {
   const wsRpc = createWebSocketRPC();
 
   try {
-    const result = await wsRpc
-      .$builder("asyncTask")
-      .timeout(10000) // 10 second timeout for function execution
-      .ackTimeout(2000) // 2 second timeout for acknowledgement
-      .retry(5) // Retry up to 5 times on failure
-      .execute();
+    const result = await wsRpc.asyncTask
+      .options({
+        timeout: 10000, // 10 second timeout for function execution
+        ackTimeout: 2000, // 2 second timeout for acknowledgement
+        retry: 5, // Retry up to 5 times on failure
+      })
+      .run();
 
     console.log("Success:", result);
   } catch (error) {
@@ -135,11 +128,9 @@ async function exampleAllBuilderOptions() {
 
 // Example 6: Chaining without params (for functions with no arguments)
 async function exampleNoParams() {
-  const result = await rpc
-    .$builder("asyncTask")
-    .timeout(5000)
-    .retry(2)
-    .execute();
+  const result = await rpc.asyncTask
+    .options({ timeout: 5000, retry: 2 })
+    .run();
 
   console.log("No params result:", result);
 }

@@ -1,16 +1,15 @@
 # nirpc
 
-A type-safe, feature-rich RPC library with builder pattern, acknowledgements, middleware, and retry logic.
+A small TypeScript-first RPC library with acknowledgements, middleware, configurable timeouts and a fluent call builder.
 
 ## Features
 
-- ✨ **Builder Pattern** - Fluent API for configuring RPC calls
-- 🔄 **Acknowledgements** - Receiver acknowledges receipt before processing
-- 🔧 **Middleware** - Hook into every request before sending
-- ♻️ **Retry Logic** - Automatic retry with configurable attempts
-- ⏱️ **Dual Timeouts** - Separate timeouts for acknowledgement and execution
-- 🎯 **Type Safety** - Full TypeScript support with type inference
-- 🚀 **Promise-based** - Modern async/await API
+- Type-safe client and server interfaces
+- Acknowledgements before work starts
+- Configurable timeouts for acknowledgement and result
+- Optional middleware hook for logging, auth, etc.
+- Per-call retry support
+- Simple builder API on each remote method
 
 ## Installation
 
@@ -18,9 +17,9 @@ A type-safe, feature-rich RPC library with builder pattern, acknowledgements, mi
 bun install
 ```
 
-## Quick Start
+## Quick start
 
-### Basic Setup
+### Basic setup
 
 ```typescript
 import { createNirpc } from "nirpc";
@@ -32,7 +31,7 @@ interface RemoteFunctions {
 
 const rpc = createNirpc<RemoteFunctions>({}, {
   post: async (data) => {
-    // Send to remote (WebSocket, PostMessage, etc.)
+    // Send to remote (WebSocket, postMessage, etc.)
   },
   on: (fn) => {
     // Listen for incoming messages
@@ -40,195 +39,126 @@ const rpc = createNirpc<RemoteFunctions>({}, {
 });
 ```
 
-### Builder Pattern (New!)
+### Calling methods
 
-The builder pattern provides a fluent API for configuring advanced RPC calls:
+Direct call:
 
 ```typescript
-// Simple call with timeout
-const result = await rpc
-  .$builder("hello")
-  .params("World")
-  .timeout(1000)
-  .execute();
-
-// With acknowledgement timeout and retry
-const result = await rpc
-  .$builder("calculate")
-  .params(10, 20)
-  .ackTimeout(500)      // Wait max 500ms for acknowledgement
-  .timeout(2000)        // Wait max 2s for result
-  .retry(3)             // Retry up to 3 times on failure
-  .execute();
+const result = await rpc.hello("World");
 ```
 
-### Middleware (New!)
+With per-call options using the builder hanging off the method:
 
-Add middleware that runs before every request:
+```typescript
+const sum = await rpc.calculate
+  .options({
+    timeout: 2000,
+    ackTimeout: 500,
+    retry: 3,
+  })
+  .run(10, 20);
+```
+
+### Middleware
+
+Middleware runs before each request and can inspect or modify the outgoing message:
 
 ```typescript
 const rpc = createNirpc<RemoteFunctions>({}, {
   post: async (data) => { /* ... */ },
   on: (fn) => { /* ... */ },
-  middleware: async (req) => {
-    // Add authentication, logging, validation, etc.
-    console.log(`Calling ${req.m} with args:`, req.a);
-    
-    // Optionally modify the request
+  middleware: (req) => {
     return {
       ...req,
-      // Add custom fields if needed
+      // attach metadata, auth tokens, etc.
     };
   },
 });
 ```
 
-### Acknowledgements (New!)
+### Acknowledgements and timeouts
 
-The receiver automatically sends an acknowledgement when it receives a request, before processing it. This helps detect network issues early:
+`createNirpc` can send an acknowledgement as soon as a request is received, before the handler runs. Timeouts are configurable both for the acknowledgement and for the handler result:
 
 ```typescript
 const rpc = createNirpc<RemoteFunctions>({}, {
   post: async (data) => { /* ... */ },
   on: (fn) => { /* ... */ },
-  ackTimeout: 5000,  // Fail if no ACK within 5 seconds
-  timeout: 30000,    // Fail if no result within 30 seconds
-  onAckTimeoutError: (functionName, args) => {
-    console.error(`No acknowledgement for ${functionName}`);
-    return false; // Return true to suppress error
-  },
-});
-```
-
-## API Reference
-
-### Builder Methods
-
-- **`.params(...args)`** - Set function parameters
-- **`.timeout(ms)`** - Set function execution timeout
-- **`.ackTimeout(ms)`** - Set acknowledgement timeout
-- **`.retry(attempts)`** - Set number of retry attempts
-- **`.execute()`** - Execute the RPC call
-
-### Options
-
-#### `middleware`
-Function that runs before sending every request. Can modify the request or perform side effects.
-
-```typescript
-middleware?: (req: Request) => Promise<Request | void> | Request | void;
-```
-
-#### `ackTimeout`
-Maximum time to wait for acknowledgement from receiver (default: 5000ms).
-
-```typescript
-ackTimeout?: number;
-```
-
-#### `onAckTimeoutError`
-Handler for acknowledgement timeout errors.
-
-```typescript
-onAckTimeoutError?: (functionName: string, args: any[]) => boolean | void;
-```
-
-### Traditional API (Still Supported)
-
-```typescript
-// Direct call
-await rpc.hello("World");
-
-// Using $call
-await rpc.$call("hello", "World");
-
-// Fire and forget
-await rpc.hello.asEvent("World");
-await rpc.$callEvent("hello", "World");
-```
-
-## Real-World Example
-
-```typescript
-// WebSocket RPC with authentication middleware
-const ws = new WebSocket("ws://localhost:3000");
-
-const rpc = createNirpc<RemoteFunctions>(localFunctions, {
-  post: async (data) => ws.send(JSON.stringify(data)),
-  on: (fn) => ws.onmessage = (e) => fn(JSON.parse(e.data)),
-  middleware: async (req) => {
-    // Add auth token to every request
-    return {
-      ...req,
-      // Could add custom metadata here
-    };
-  },
-  ackTimeout: 3000,
+  ackTimeout: 5000,
   timeout: 30000,
+  onAckTimeoutError: (functionName, args) => {
+    console.error(`No acknowledgement for ${functionName}`, args);
+    // return true to suppress throwing the error
+  },
+});
+```
+
+## API surface
+
+### `createNirpc`
+
+Creates an RPC instance:
+
+```typescript
+const rpc = createNirpc<RemoteFunctions, LocalFunctions>(localFunctions, {
+  post,
+  on,
+  off,
+  serialize,
+  deserialize,
+  bind,
+  eventNames,
+  timeout,
+  ackTimeout,
+  resolver,
+  middleware,
+  onRequest,
+  onError,
+  onFunctionError,
+  onGeneralError,
+  onTimeoutError,
+  onAckTimeoutError,
+});
+```
+
+Each remote function is exposed as:
+
+- `rpc.method(...args)` – regular call returning a promise
+- `rpc.method.asEvent(...args)` – fire-and-forget
+- `rpc.method.options({ timeout?, ackTimeout?, retry? }).run(...args)` – call with per-invocation options
+
+Additional helpers:
+
+- `rpc.$call(name, ...args)`
+- `rpc.$callOptional(name, ...args)`
+- `rpc.$callEvent(name, ...args)`
+- `rpc.$builder(name)` – lower-level builder (`params().timeout().ackTimeout().retry().execute()`)
+- `rpc.$close(error?)`
+- `rpc.$rejectPendingCalls(handler?)`
+
+### `createNirpcGroup`
+
+For broadcasting the same call to multiple channels:
+
+```typescript
+import { createNirpcGroup } from "nirpc";
+
+const group = createNirpcGroup<RemoteFunctions>(localFunctions, () => channels, {
+  timeout: 10_000,
 });
 
-// Use with builder pattern
-try {
-  const result = await rpc
-    .$builder("processPayment")
-    .params(orderId, amount)
-    .timeout(10000)
-    .ackTimeout(2000)
-    .retry(3)
-    .execute();
-  
-  console.log("Payment processed:", result);
-} catch (error) {
-  console.error("Payment failed:", error);
-}
+await group.broadcast.processEvent("payload");
+await group.broadcast.processEvent.asEvent("payload");
 ```
 
 ## Examples
 
-Run the examples:
+Run the examples in this repo with:
 
 ```bash
 bun run examples.ts
 ```
 
-## How It Works
-
-### Message Flow with Acknowledgements
-
-1. **Sender** → Request → **Receiver**
-2. **Receiver** → ACK → **Sender** (acknowledges receipt)
-3. **Receiver** processes function
-4. **Receiver** → Response → **Sender** (returns result)
-
-### Retry Behavior
-
-If a call fails (timeout, network error, etc.), the builder will automatically retry:
-
-- Generates a new request ID for each retry
-- Waits for both ACK and response on each attempt
-- Throws error only after all retry attempts are exhausted
-
-## Type Safety
-
-The library is fully typed. TypeScript will infer parameter and return types:
-
-```typescript
-interface RemoteFunctions {
-  add: (a: number, b: number) => number;
-}
-
-// ✅ Type-safe
-const sum = await rpc.$builder("add").params(1, 2).execute();
-// sum is inferred as number
-
-// ❌ Type error
-await rpc.$builder("add").params("hello", "world").execute();
-```
-
 ## License
 
 MIT
-
----
-
-This project uses [Bun](https://bun.com) - a fast all-in-one JavaScript runtime.

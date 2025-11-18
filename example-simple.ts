@@ -138,21 +138,17 @@ async function runSimpleExample() {
 
   // Example 3: Builder pattern with timeout
   console.log("--- Example 3: Builder Pattern ---");
-  const result = await client
-    .$builder("slowOperation")
-    .timeout(2000)
-    .ackTimeout(500)
-    .execute();
+  const result = await client.slowOperation
+    .options({ timeout: 2000, ackTimeout: 500 })
+    .run();
   console.log(`Result: ${result}\n`);
 
   // Example 4: Builder with retry
   console.log("--- Example 4: Retry on Failure ---");
   try {
-    await client
-      .$builder("failingOperation")
-      .timeout(1000)
-      .retry(2)
-      .execute();
+    await client.failingOperation
+      .options({ timeout: 1000, retry: 2 })
+      .run();
   } catch (error: any) {
     console.log(`Caught error after retries: ${error.message}\n`);
   }
@@ -171,9 +167,9 @@ async function runSimpleExample() {
   // Example 7: Multiple calls with builder
   console.log("--- Example 7: Multiple Calls ---");
   const results = await Promise.all([
-    client.$builder("add").params(1, 2).execute(),
-    client.$builder("add").params(3, 4).execute(),
-    client.$builder("greet").params("Charlie").execute(),
+    client.add.options({}).run(1, 2),
+    client.add.options({ timeout: 1000 }).run(3, 4),
+    client.greet.options({ ackTimeout: 500 }).run("Charlie"),
   ]);
   console.log(`Results: ${JSON.stringify(results)}\n`);
 
