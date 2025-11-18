@@ -14,7 +14,7 @@ A small TypeScript-first RPC library with acknowledgements, middleware, configur
 ## Installation
 
 ```bash
-bun install
+bun install nirpc
 ```
 
 ## Quick start
