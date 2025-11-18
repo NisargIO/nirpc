@@ -1,10 +1,16 @@
-const rpc = {} as any;
-const params = {} as any;
+import type { NirpcReturn } from "./index";
+
+type Remote = {
+  hello: (payload: { name: string }) => Promise<string>;
+};
+
+const rpc = {} as NirpcReturn<Remote>;
 
 rpc
   .method("hello")
-  .params(params)
-  .timeout(1000)
-  .ackTimeout(1000)
+  .params({ name: "Cursor" })
+  .timeout(1_000)
+  .ackTimeout(500)
   .retry(3)
-  .execute();
+  .execute()
+  .then(console.log);
