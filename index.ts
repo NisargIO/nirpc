@@ -834,7 +834,7 @@ function nanoid(size = 21) {
 /**
  * Builder class for creating RPC calls with advanced options
  */
-export class NirpcCallBuilder<T extends (...args: any[]) => any> {
+export class NirpcCallBuilder<T> {
   private _method: string;
   private _args: ArgumentsType<T> = [] as any;
   private _timeout?: number;
